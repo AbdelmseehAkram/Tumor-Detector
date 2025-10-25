@@ -28,67 +28,52 @@ def download_and_load_model():
             gdown.download(model_url, weights_path, quiet=False)
 
     try:
-        # 🧠 Rebuild the model architecture exactly as in training
+        # 🧠 Rebuild the model using Functional API for Grad-CAM
         base_model = tf.keras.applications.MobileNetV2(
             weights='imagenet', include_top=False, input_shape=(224, 224, 3)
         )
         base_model.trainable = False
 
-        model = tf.keras.Sequential([
-            base_model,
-            tf.keras.layers.GlobalAveragePooling2D(),
-            tf.keras.layers.Dense(128, activation='relu'),
-            tf.keras.layers.Dropout(0.3),
-            tf.keras.layers.Dense(2, activation='softmax')
-        ])
+        # 🔧 FIX: Use Functional API instead of Sequential
+        inputs = tf.keras.Input(shape=(224, 224, 3))
+        x = base_model(inputs, training=False)
+        x = tf.keras.layers.GlobalAveragePooling2D()(x)
+        x = tf.keras.layers.Dense(128, activation='relu')(x)
+        x = tf.keras.layers.Dropout(0.3)(x)
+        outputs = tf.keras.layers.Dense(2, activation='softmax')(x)
+        
+        model = tf.keras.Model(inputs=inputs, outputs=outputs)
 
-        # Load weights instead of full model
+        # Load weights
         model.load_weights(weights_path)
 
-        # 🔧 FIX: Get the correct last conv layer for MobileNetV2
-        # Print all layer names to debug
-        st.write("🔍 **Debug: Available layers in base_model:**")
-        layer_names = [layer.name for layer in base_model.layers if 'conv' in layer.name.lower()]
-        st.write(layer_names[-5:])  # Show last 5 conv layers
+        # 🔧 FIX: Get the last conv layer from base_model properly
+        # Find the last convolutional layer in MobileNetV2
+        last_conv_layer = None
+        for layer in reversed(base_model.layers):
+            if len(layer.output_shape) == 4:  # Convolutional layer
+                last_conv_layer = layer
+                st.info(f"🎯 Using layer for Grad-CAM: **{layer.name}**")
+                break
         
-        # Try different possible last conv layer names
-        conv_model = None
-        head_model = None
-        try:
-            # MobileNetV2's actual last conv layer names
-            possible_names = ["out_relu", "Conv_1", "Conv_1_bn", "block_16_project"]
-            last_conv_layer = None
-            
-            for name in possible_names:
-                try:
-                    last_conv_layer = base_model.get_layer(name)
-                    st.success(f"✅ Found layer: {name}")
-                    break
-                except:
-                    continue
-            
-            if last_conv_layer is None:
-                # Fallback: get last layer with output
-                for layer in reversed(base_model.layers):
-                    if len(layer.output_shape) == 4:  # Conv layer has 4D output
-                        last_conv_layer = layer
-                        st.success(f"✅ Using fallback layer: {layer.name}")
-                        break
-            
-            if last_conv_layer:
-                conv_model = tf.keras.models.Model(inputs=model.input, outputs=last_conv_layer.output)
-                head_model = tf.keras.models.Model(inputs=last_conv_layer.output, outputs=model.output)
-            
-        except Exception as e:
-            st.warning(f"⚠️ Grad-CAM setup warning: {e}")
+        # Create Grad-CAM model
+        grad_model = None
+        if last_conv_layer:
+            grad_model = tf.keras.Model(
+                inputs=[model.inputs],
+                outputs=[last_conv_layer.output, model.output]
+            )
 
-        return model, conv_model, head_model
+        return model, grad_model
+        
     except Exception as e:
-        st.error(f"❌ Error loading weights: {e}")
+        st.error(f"❌ Error loading model: {e}")
+        import traceback
+        st.code(traceback.format_exc())
         raise e
 
 
-model, conv_model, head_model = download_and_load_model()
+model, grad_model = download_and_load_model()
 st.success("✅ Model loaded successfully!")
 
 # ==========================================================
@@ -101,63 +86,68 @@ def predict_and_visualize(img: Image.Image):
         np.expand_dims(input_img, axis=0)
     )
 
-    preds = model.predict(input_array)
+    # Get predictions
+    preds = model.predict(input_array, verbose=0)
     pred_idx = np.argmax(preds[0])
     
-    # 🔧 FIX: Show both class probabilities for debugging
-    st.write(f"**Debug - Class 0 (Tumor?): {preds[0][0]*100:.2f}%**")
-    st.write(f"**Debug - Class 1 (Normal?): {preds[0][1]*100:.2f}%**")
+    # 🔧 Show both class probabilities for debugging
+    st.write(f"**📊 Class 0 probability: {preds[0][0]*100:.2f}%**")
+    st.write(f"**📊 Class 1 probability: {preds[0][1]*100:.2f}%**")
+    st.write(f"**🎯 Predicted class index: {pred_idx}**")
     
     pred_label = "Tumor" if pred_idx == 0 else "Normal"
     confidence = preds[0][pred_idx] * 100
 
-    # Grad-CAM - Only for TUMOR predictions
+    # Generate Grad-CAM heatmap
     overlay = img_array
     
-    if conv_model and head_model:
+    if grad_model is not None:
         try:
             input_tensor = tf.convert_to_tensor(input_array)
             
             with tf.GradientTape() as tape:
-                conv_outputs = conv_model(input_tensor)
-                tape.watch(conv_outputs)
-                predictions = head_model(conv_outputs)
-                # 🔧 FIX: Always use index 0 (Tumor class) for heatmap
-                loss = predictions[:, 0]  # Changed from pred_idx to 0
+                conv_outputs, predictions = grad_model(input_tensor)
+                # 🔧 Focus on Tumor class (index 0) OR the predicted class
+                # Change this to 0 if you always want tumor heatmap, or pred_idx for predicted class
+                class_channel = predictions[:, pred_idx]  # Use pred_idx or change to 0 for tumor
 
-            grads = tape.gradient(loss, conv_outputs)
+            # Compute gradients
+            grads = tape.gradient(class_channel, conv_outputs)
             
             if grads is not None:
-                grads = grads[0]
-                pooled_grads = tf.reduce_mean(grads, axis=(0, 1))
-                conv_outputs_val = conv_outputs[0]
+                # Global average pooling on gradients
+                pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
                 
-                # Weight the channels by the gradients
-                for i in range(pooled_grads.shape[-1]):
-                    conv_outputs_val[:, :, i] *= pooled_grads[i]
+                # Weight the conv outputs by the gradients
+                conv_outputs = conv_outputs[0]
+                heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
+                heatmap = tf.squeeze(heatmap)
                 
-                heatmap = tf.reduce_mean(conv_outputs_val, axis=-1)
-                heatmap = np.maximum(heatmap, 0)
+                # Normalize heatmap
+                heatmap = tf.maximum(heatmap, 0)
+                if tf.reduce_max(heatmap) != 0:
+                    heatmap = heatmap / tf.reduce_max(heatmap)
                 
-                if np.max(heatmap) != 0:
-                    heatmap /= np.max(heatmap)
+                heatmap = heatmap.numpy()
                 
-                # Resize and apply colormap
-                heatmap = cv2.resize(heatmap.numpy(), (img_array.shape[1], img_array.shape[0]))
+                # Resize to original image size
+                heatmap = cv2.resize(heatmap, (img_array.shape[1], img_array.shape[0]))
                 heatmap = np.uint8(255 * heatmap)
-                heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+                
+                # Apply colormap
+                heatmap_colored = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
                 
                 # Blend with original image
-                overlay = cv2.addWeighted(img_array, 0.6, heatmap, 0.4, 0)
-                st.success("✅ Grad-CAM generated successfully!")
+                overlay = cv2.addWeighted(img_array, 0.6, heatmap_colored, 0.4, 0)
+                
+                st.success("✅ Grad-CAM heatmap generated!")
             else:
-                st.warning("⚠️ Gradients are None")
+                st.warning("⚠️ Could not compute gradients")
                 
         except Exception as e:
-            st.error(f"❌ Error in Grad-CAM: {e}")
+            st.error(f"❌ Grad-CAM error: {e}")
             import traceback
             st.code(traceback.format_exc())
-            overlay = img_array
 
     return pred_label, confidence, overlay
 
@@ -169,20 +159,32 @@ uploaded_file = st.file_uploader("📁 Upload an MRI Image", type=["jpg", "jpeg"
 
 if uploaded_file:
     img = Image.open(uploaded_file).convert("RGB")
-    st.image(np.array(img), caption="🧩 Uploaded Image", use_container_width=True)
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.image(np.array(img), caption="🧩 Original Image", use_container_width=True)
 
-    if st.button("🔍 Analyze Image"):
-        with st.spinner("Analyzing..."):
+    if st.button("🔍 Analyze Image", type="primary"):
+        with st.spinner("🧠 Analyzing brain MRI..."):
             label, conf, cam = predict_and_visualize(img)
 
-        st.markdown(f"### 🧾 Prediction: **{label} ({conf:.2f}%)**")
-        st.image(
-            cv2.cvtColor(cam, cv2.COLOR_BGR2RGB),
-            caption="🔥 Grad-CAM Visualization (Tumor Focus)",
-            use_container_width=True
-        )
+        st.markdown(f"### 🧾 Prediction: **{label}** (Confidence: **{conf:.2f}%**)")
+        
+        with col2:
+            st.image(
+                cv2.cvtColor(cam, cv2.COLOR_BGR2RGB),
+                caption="🔥 Grad-CAM Heatmap",
+                use_container_width=True
+            )
+        
+        # Interpretation
+        if label == "Tumor":
+            st.error("⚠️ **Tumor detected!** The highlighted regions show areas of concern.")
+        else:
+            st.success("✅ **No tumor detected.** The brain scan appears normal.")
+            
 else:
-    st.info("Please upload an image to start.")
+    st.info("👆 Please upload an MRI image to start the analysis.")
 
 st.markdown("---")
 st.caption("Developed by Seha | Powered by TensorFlow & Streamlit 🚀")
