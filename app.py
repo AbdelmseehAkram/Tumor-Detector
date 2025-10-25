@@ -83,10 +83,12 @@ def predict_and_visualize(img: Image.Image):
     # Grad-CAM
     if grad_model:
         try:
+            input_tensor = tf.convert_to_tensor(input_array)  # Explicitly convert to tensor for safety
             with tf.GradientTape() as tape:
-                conv_outputs, predictions = grad_model(input_array)
+                conv_outputs, predictions = grad_model(input_tensor)
                 loss = predictions[:, pred_idx]
 
+            tape.watch(conv_outputs)  # Add this line to enable gradient computation w.r.t. conv_outputs
             grads = tape.gradient(loss, conv_outputs)[0]
             pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
             heatmap = tf.reduce_mean(tf.multiply(pooled_grads, conv_outputs[0]), axis=-1)
