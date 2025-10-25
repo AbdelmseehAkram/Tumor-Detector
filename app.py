@@ -12,7 +12,7 @@ import tempfile
 # ==========================================================
 st.set_page_config(page_title="Brain Tumor Detector", page_icon="🧠", layout="wide")
 st.title("🧠 Brain Tumor Detection")
-st.write("Upload an MRI image to predict whether it has a tumor.")
+st.write("Upload image to predict whether it has a tumor.")
 
 # ==========================================================
 # Download and Load Model from Google Drive
@@ -238,7 +238,7 @@ def predict_and_visualize(img: Image.Image):
 # UI
 # ==========================================================
 st.write("---")
-uploaded_file = st.file_uploader("📁 Upload MRI Image", type=["jpg", "jpeg", "png"])
+uploaded_file = st.file_uploader("📁 Upload Image", type=["jpg", "jpeg", "png"])
 
 if uploaded_file:
     img = Image.open(uploaded_file).convert("RGB")
@@ -269,5 +269,6 @@ else:
     st.info("👆 Upload an image to start")
 
 st.markdown("---")
-st.caption("Developed by Seha | TensorFlow & Streamlit 🚀")
+st.caption("Developed by Abdelmseeh | TensorFlow & Streamlit 🚀")
 st.caption("⚠️ Educational purposes only. Consult medical professionals.")
+
