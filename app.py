@@ -47,42 +47,70 @@ def download_and_load_model():
         # Load weights
         model.load_weights(weights_path)
 
-        # 🔧 FIX: Get the last conv layer from base_model properly
-        # Find the last convolutional layer in MobileNetV2
+        # 🔧 FIX: Access layers INSIDE the base_model (MobileNetV2 internal layers)
+        st.write("🔍 **Searching for convolutional layers...**")
+        st.write(f"📦 Base model type: {type(base_model).__name__}")
+        st.write(f"📦 Base model has {len(base_model.layers)} layers")
+        
         last_conv_layer = None
         conv_layers_found = []
         
+        # Search through ALL layers in base_model (including nested ones)
         for layer in reversed(base_model.layers):
-            # Check if layer has output_shape attribute first
-            if hasattr(layer, 'output_shape') and layer.output_shape is not None:
-                try:
-                    if len(layer.output_shape) == 4:  # Convolutional layer
-                        conv_layers_found.append(layer.name)
-                        if last_conv_layer is None:
-                            last_conv_layer = layer
-                except:
-                    pass
-        
+            # Check layer type by name patterns
+            layer_type = type(layer).__name__
+            
+            if 'Conv' in layer_type:
+                conv_layers_found.append(f"{layer.name} ({layer_type})")
+                if last_conv_layer is None:
+                    last_conv_layer = layer
+                    
         st.write(f"🔍 **Found {len(conv_layers_found)} conv layers**")
         if conv_layers_found:
-            st.write(f"📋 Last 3 conv layers: {conv_layers_found[:3]}")
+            st.write(f"📋 Available conv layers:")
+            for i, layer_info in enumerate(conv_layers_found[:5]):  # Show first 5
+                st.write(f"  {i+1}. {layer_info}")
+        
+        # If still not found, try known MobileNetV2 layer names
+        if last_conv_layer is None:
+            st.warning("⚠️ Trying known MobileNetV2 layer names...")
+            known_layers = [
+                'out_relu',
+                'Conv_1', 
+                'Conv_1_bn',
+                'block_16_project',
+                'block_16_project_BN'
+            ]
+            
+            for layer_name in known_layers:
+                try:
+                    last_conv_layer = base_model.get_layer(layer_name)
+                    st.success(f"✅ Found layer by name: **{layer_name}**")
+                    break
+                except:
+                    st.write(f"  ❌ '{layer_name}' not found")
+                    continue
         
         if last_conv_layer:
-            st.success(f"✅ Using layer for Grad-CAM: **{last_conv_layer.name}**")
+            st.success(f"🎯 Using layer for Grad-CAM: **{last_conv_layer.name}** (type: {type(last_conv_layer).__name__})")
         else:
-            st.error("❌ No convolutional layer found!")
+            st.error("❌ No convolutional layer found! Grad-CAM will be disabled.")
+            st.info("💡 Try printing base_model.summary() to see all available layers")
         
         # Create Grad-CAM model
         grad_model = None
         if last_conv_layer:
             try:
+                # Build grad model using the last conv layer from base_model
                 grad_model = tf.keras.Model(
-                    inputs=[model.inputs],
+                    inputs=model.inputs,
                     outputs=[last_conv_layer.output, model.output]
                 )
                 st.success("✅ Grad-CAM model created successfully!")
             except Exception as e:
                 st.error(f"❌ Failed to create Grad-CAM model: {e}")
+                import traceback
+                st.code(traceback.format_exc())
 
         return model, grad_model, last_conv_layer
         
