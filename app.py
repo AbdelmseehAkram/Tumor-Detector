@@ -82,43 +82,68 @@ def download_and_load_model():
         st.success("✅ Model weights loaded!")
         
         # 🔥 Build separate Grad-CAM model
-        # This model takes the same input but outputs BOTH conv features AND predictions
+        # The trick: we need ONE unified model for gradient flow
         grad_model = None
         
         if last_conv_layer_name:
             try:
-                # Create a model that maps: input -> [conv_output, final_prediction]
-                # We get conv output by running a sub-model of base_model
-                conv_model = tf.keras.Model(
-                    inputs=base_model.inputs,
-                    outputs=base_model.get_layer(last_conv_layer_name).output
+                # 🎯 KEY INSIGHT: Build a SINGLE model with both outputs from the SAME graph
+                # Not two separate models!
+                
+                # Start fresh with inputs
+                grad_inputs = tf.keras.Input(shape=(224, 224, 3))
+                
+                # Pass through base_model (this creates the computational graph)
+                grad_x = base_model(grad_inputs, training=False)
+                
+                # Get conv layer output from THIS graph (not from base_model directly)
+                # We need to access the intermediate tensor in THIS call
+                
+                # The base_model when called creates internal tensors
+                # We can access them through the layer's output in this specific call
+                
+                # Continue with the rest of the model
+                grad_x2 = tf.keras.layers.GlobalAveragePooling2D()(grad_x)
+                grad_x2 = tf.keras.layers.Dense(128, activation='relu')(grad_x2)
+                grad_x2 = tf.keras.layers.Dropout(0.3)(grad_x2)
+                grad_predictions = tf.keras.layers.Dense(2, activation='softmax')(grad_x2)
+                
+                # Now build a model that outputs BOTH the conv features AND predictions
+                # We get conv features by creating a sub-model
+                conv_layer_output = base_model.get_layer(last_conv_layer_name).output
+                
+                # Create intermediate model to extract conv output
+                base_model_for_grad = tf.keras.Model(
+                    inputs=base_model.input,
+                    outputs=[conv_layer_output, base_model.output]
                 )
                 
-                # Now create the grad model
-                def get_gradcam_outputs(input_img):
-                    # Get conv features from base model
-                    conv_features = conv_model(input_img)
-                    # Get final predictions from full model
-                    predictions = model(input_img)
-                    return conv_features, predictions
+                # Build the full grad model
+                conv_features, _ = base_model_for_grad(grad_inputs)
                 
-                # Build as functional model
-                test_input = tf.keras.Input(shape=(224, 224, 3))
-                conv_out = conv_model(test_input)
-                pred_out = model(test_input)
+                # Now trace through the classification head
+                x_from_conv = tf.keras.layers.GlobalAveragePooling2D()(conv_features)
+                x_from_conv = tf.keras.layers.Dense(128, activation='relu')(x_from_conv)
+                x_from_conv = tf.keras.layers.Dropout(0.3)(x_from_conv) 
+                final_predictions = tf.keras.layers.Dense(2, activation='softmax')(x_from_conv)
                 
                 grad_model = tf.keras.Model(
-                    inputs=test_input,
-                    outputs=[conv_out, pred_out]
+                    inputs=grad_inputs,
+                    outputs=[conv_features, final_predictions]
                 )
                 
-                # Verify it works
+                # Load the SAME weights into this new model
+                grad_model.load_weights(weights_path)
+                
+                # Verify
                 test_data = np.random.random((1, 224, 224, 3)).astype('float32')
                 test_conv, test_pred = grad_model(test_data)
                 st.success(f"✅ Grad-CAM ready! Conv: {test_conv.shape}, Pred: {test_pred.shape}")
                 
             except Exception as e:
-                st.error(f"❌ Grad-CAM failed: {e}")
+                st.error(f"❌ Grad-CAM build failed: {e}")
+                import traceback
+                st.code(traceback.format_exc())
                 grad_model = None
         
         return model, grad_model, last_conv_layer_name
@@ -187,7 +212,7 @@ def predict_and_visualize(img: Image.Image):
     st.write(f"**Class 1**: {preds[0][1]*100:.2f}%")
     
     # Label (adjust if needed: swap 0 and 1 if labels are reversed)
-    pred_label = "Tumor" if pred_idx == 1 else "Normal"
+    pred_label = "Tumor" if pred_idx == 0 else "Normal"
     confidence = preds[0][pred_idx] * 100
     
     # Generate Grad-CAM
