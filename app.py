@@ -12,13 +12,20 @@ from PIL import Image
 # =============================
 @st.cache_resource
 def load_model():
+    import h5py
     model_path = "brain_tumor_model.h5"
     if not os.path.exists(model_path):
         file_id = "1MNzIKsB2VKNleMR2hQzBMpeD69eiF0ej"
         url = f"https://drive.google.com/uc?id={file_id}"
         gdown.download(url, model_path, quiet=False)
-    model = tf.keras.models.load_model(model_path)
+    
+    try:
+        model = tf.keras.models.load_model(model_path)
+    except Exception as e:
+        st.warning("⚠️ Model loaded without compilation due to version mismatch.")
+        model = tf.keras.models.load_model(model_path, compile=False)
     return model
+
 
 
 # =============================
@@ -71,3 +78,4 @@ if uploaded_file is not None:
                  caption="Detected Tumor Area", use_container_width=True)
     else:
         st.success(f"✅ No Tumor Detected. Confidence: {(1 - prediction) * 100:.2f}%")
+
