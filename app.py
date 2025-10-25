@@ -27,6 +27,10 @@ def load_model():
 # Load model
 model = load_model()
 
+# Get model input shape automatically
+input_shape = model.input_shape[1:3]  # e.g. (128, 128)
+st.write(f"🧩 Model expects input size: {input_shape}")
+
 # 🎨 Streamlit UI
 st.title("🧠 Brain Tumor Detection App")
 st.write("Upload an MRI image to check if a brain tumor is detected.")
@@ -39,7 +43,7 @@ if uploaded_file is not None:
         image_path = tmp.name
 
     image = cv2.imread(image_path)
-    image_resized = cv2.resize(image, (224, 224))
+    image_resized = cv2.resize(image, input_shape)  # ✅ dynamically uses correct size
     image_array = np.expand_dims(image_resized / 255.0, axis=0)
 
     st.image(image, caption="Uploaded Image", use_column_width=True)
