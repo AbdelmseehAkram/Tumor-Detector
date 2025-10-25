@@ -86,9 +86,9 @@ def predict_and_visualize(img: Image.Image):
             input_tensor = tf.convert_to_tensor(input_array)  # Explicitly convert to tensor for safety
             with tf.GradientTape() as tape:
                 conv_outputs, predictions = grad_model(input_tensor)
+                tape.watch(conv_outputs)  # Moved inside the with block, right after computing conv_outputs
                 loss = predictions[:, pred_idx]
 
-            tape.watch(conv_outputs)  # Add this line to enable gradient computation w.r.t. conv_outputs
             grads = tape.gradient(loss, conv_outputs)[0]
             pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
             heatmap = tf.reduce_mean(tf.multiply(pooled_grads, conv_outputs[0]), axis=-1)
@@ -100,7 +100,8 @@ def predict_and_visualize(img: Image.Image):
             heatmap = np.uint8(255 * heatmap)
             heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
             overlay = cv2.addWeighted(img_array, 0.6, heatmap, 0.4, 0)
-        except Exception:
+        except Exception as e:
+            st.error(f"❌ Error in Grad-CAM: {e}")
             overlay = img_array
     else:
         overlay = img_array
