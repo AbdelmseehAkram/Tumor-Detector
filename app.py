@@ -50,7 +50,7 @@ def download_and_load_model():
         conv_model = None
         head_model = None
         try:
-            last_conv_layer = base_model.get_layer("Conv_1")
+            last_conv_layer = base_model.get_layer("out_relu")
             conv_model = tf.keras.models.Model(inputs=model.input, outputs=last_conv_layer.output)
             head_model = tf.keras.models.Model(inputs=last_conv_layer.output, outputs=model.output)
         except Exception:
