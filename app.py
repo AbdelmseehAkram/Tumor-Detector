@@ -50,23 +50,41 @@ def download_and_load_model():
         # 🔧 FIX: Get the last conv layer from base_model properly
         # Find the last convolutional layer in MobileNetV2
         last_conv_layer = None
+        conv_layers_found = []
+        
         for layer in reversed(base_model.layers):
             # Check if layer has output_shape attribute first
             if hasattr(layer, 'output_shape') and layer.output_shape is not None:
-                if len(layer.output_shape) == 4:  # Convolutional layer
-                    last_conv_layer = layer
-                    st.info(f"🎯 Using layer for Grad-CAM: **{layer.name}**")
-                    break
+                try:
+                    if len(layer.output_shape) == 4:  # Convolutional layer
+                        conv_layers_found.append(layer.name)
+                        if last_conv_layer is None:
+                            last_conv_layer = layer
+                except:
+                    pass
+        
+        st.write(f"🔍 **Found {len(conv_layers_found)} conv layers**")
+        if conv_layers_found:
+            st.write(f"📋 Last 3 conv layers: {conv_layers_found[:3]}")
+        
+        if last_conv_layer:
+            st.success(f"✅ Using layer for Grad-CAM: **{last_conv_layer.name}**")
+        else:
+            st.error("❌ No convolutional layer found!")
         
         # Create Grad-CAM model
         grad_model = None
         if last_conv_layer:
-            grad_model = tf.keras.Model(
-                inputs=[model.inputs],
-                outputs=[last_conv_layer.output, model.output]
-            )
+            try:
+                grad_model = tf.keras.Model(
+                    inputs=[model.inputs],
+                    outputs=[last_conv_layer.output, model.output]
+                )
+                st.success("✅ Grad-CAM model created successfully!")
+            except Exception as e:
+                st.error(f"❌ Failed to create Grad-CAM model: {e}")
 
-        return model, grad_model
+        return model, grad_model, last_conv_layer
         
     except Exception as e:
         st.error(f"❌ Error loading model: {e}")
@@ -75,7 +93,7 @@ def download_and_load_model():
         raise e
 
 
-model, grad_model = download_and_load_model()
+model, grad_model, last_conv_layer = download_and_load_model()
 st.success("✅ Model loaded successfully!")
 
 # ==========================================================
@@ -103,53 +121,82 @@ def predict_and_visualize(img: Image.Image):
     # Generate Grad-CAM heatmap
     overlay = img_array
     
-    if grad_model is not None:
-        try:
-            input_tensor = tf.convert_to_tensor(input_array)
+    st.write("---")
+    st.write("### 🔬 Grad-CAM Debug Info:")
+    
+    if grad_model is None:
+        st.error("❌ Grad-CAM model is None! Cannot generate heatmap.")
+        return pred_label, confidence, overlay
+    
+    st.info(f"✅ Grad-CAM model exists")
+    
+    try:
+        input_tensor = tf.convert_to_tensor(input_array)
+        st.info(f"✅ Input tensor shape: {input_tensor.shape}")
+        
+        with tf.GradientTape() as tape:
+            conv_outputs, predictions = grad_model(input_tensor)
+            st.info(f"✅ Conv outputs shape: {conv_outputs.shape}")
+            st.info(f"✅ Predictions shape: {predictions.shape}")
             
-            with tf.GradientTape() as tape:
-                conv_outputs, predictions = grad_model(input_tensor)
-                # 🔧 Focus on Tumor class (index 0) OR the predicted class
-                # Change this to 0 if you always want tumor heatmap, or pred_idx for predicted class
-                class_channel = predictions[:, pred_idx]  # Use pred_idx or change to 0 for tumor
+            # 🔧 Focus on predicted class
+            class_channel = predictions[:, pred_idx]
+            st.info(f"✅ Class channel value: {class_channel.numpy()[0]:.4f}")
 
-            # Compute gradients
-            grads = tape.gradient(class_channel, conv_outputs)
+        # Compute gradients
+        grads = tape.gradient(class_channel, conv_outputs)
+        
+        if grads is None:
+            st.error("❌ Gradients are None! This means the gradient computation failed.")
+            st.warning("💡 Possible reasons: layer not trainable, or disconnected from output")
+            return pred_label, confidence, overlay
+        
+        st.success(f"✅ Gradients computed! Shape: {grads.shape}")
+        st.info(f"📊 Gradient stats: min={tf.reduce_min(grads):.6f}, max={tf.reduce_max(grads):.6f}, mean={tf.reduce_mean(grads):.6f}")
+        
+        # Global average pooling on gradients
+        pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+        st.info(f"✅ Pooled gradients shape: {pooled_grads.shape}")
+        
+        # Weight the conv outputs by the gradients
+        conv_outputs = conv_outputs[0]
+        heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
+        heatmap = tf.squeeze(heatmap)
+        
+        st.info(f"✅ Heatmap shape before normalization: {heatmap.shape}")
+        st.info(f"📊 Heatmap stats: min={tf.reduce_min(heatmap):.6f}, max={tf.reduce_max(heatmap):.6f}")
+        
+        # Normalize heatmap
+        heatmap = tf.maximum(heatmap, 0)
+        heatmap_max = tf.reduce_max(heatmap)
+        
+        if heatmap_max == 0:
+            st.error("❌ Heatmap is all zeros! Cannot normalize.")
+            return pred_label, confidence, overlay
+        
+        heatmap = heatmap / heatmap_max
+        heatmap = heatmap.numpy()
+        
+        st.success(f"✅ Heatmap normalized! Values range: {heatmap.min():.3f} to {heatmap.max():.3f}")
+        
+        # Resize to original image size
+        heatmap = cv2.resize(heatmap, (img_array.shape[1], img_array.shape[0]))
+        heatmap = np.uint8(255 * heatmap)
+        
+        st.info(f"✅ Heatmap resized to: {heatmap.shape}")
+        
+        # Apply colormap
+        heatmap_colored = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+        
+        # Blend with original image
+        overlay = cv2.addWeighted(img_array, 0.6, heatmap_colored, 0.4, 0)
+        
+        st.success("🎉 Grad-CAM heatmap generated successfully!")
             
-            if grads is not None:
-                # Global average pooling on gradients
-                pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-                
-                # Weight the conv outputs by the gradients
-                conv_outputs = conv_outputs[0]
-                heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
-                heatmap = tf.squeeze(heatmap)
-                
-                # Normalize heatmap
-                heatmap = tf.maximum(heatmap, 0)
-                if tf.reduce_max(heatmap) != 0:
-                    heatmap = heatmap / tf.reduce_max(heatmap)
-                
-                heatmap = heatmap.numpy()
-                
-                # Resize to original image size
-                heatmap = cv2.resize(heatmap, (img_array.shape[1], img_array.shape[0]))
-                heatmap = np.uint8(255 * heatmap)
-                
-                # Apply colormap
-                heatmap_colored = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
-                
-                # Blend with original image
-                overlay = cv2.addWeighted(img_array, 0.6, heatmap_colored, 0.4, 0)
-                
-                st.success("✅ Grad-CAM heatmap generated!")
-            else:
-                st.warning("⚠️ Could not compute gradients")
-                
-        except Exception as e:
-            st.error(f"❌ Grad-CAM error: {e}")
-            import traceback
-            st.code(traceback.format_exc())
+    except Exception as e:
+        st.error(f"❌ Grad-CAM error: {e}")
+        import traceback
+        st.code(traceback.format_exc())
 
     return pred_label, confidence, overlay
 
