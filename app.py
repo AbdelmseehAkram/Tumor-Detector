@@ -46,23 +46,23 @@ def download_and_load_model():
         # Load weights instead of full model
         model.load_weights(weights_path)
 
-        # Create Grad-CAM helper safely
+        # Create Grad-CAM helpers safely
+        conv_model = None
+        head_model = None
         try:
             last_conv_layer = base_model.get_layer("Conv_1")
-            grad_model = tf.keras.models.Model(
-                inputs=base_model.input,
-                outputs=[last_conv_layer.output, model.output]
-            )
+            conv_model = tf.keras.models.Model(inputs=model.input, outputs=last_conv_layer.output)
+            head_model = tf.keras.models.Model(inputs=last_conv_layer.output, outputs=model.output)
         except Exception:
-            grad_model = None
+            pass
 
-        return model, grad_model
+        return model, conv_model, head_model
     except Exception as e:
         st.error(f"❌ Error loading weights: {e}")
         raise e
 
 
-model, grad_model = download_and_load_model()
+model, conv_model, head_model = download_and_load_model()
 st.success("✅ Model loaded successfully!")
 
 # ==========================================================
@@ -81,12 +81,13 @@ def predict_and_visualize(img: Image.Image):
     confidence = preds[0][pred_idx] * 100
 
     # Grad-CAM
-    if grad_model:
+    if conv_model and head_model:
         try:
             input_tensor = tf.convert_to_tensor(input_array)  # Explicitly convert to tensor for safety
             with tf.GradientTape() as tape:
-                conv_outputs, predictions = grad_model(input_tensor)
-                tape.watch(conv_outputs)  # Moved inside the with block, right after computing conv_outputs
+                conv_outputs = conv_model(input_tensor)
+                tape.watch(conv_outputs)
+                predictions = head_model(conv_outputs)
                 loss = predictions[:, pred_idx]
 
             grads = tape.gradient(loss, conv_outputs)[0]
