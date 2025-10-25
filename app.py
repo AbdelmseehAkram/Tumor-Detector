@@ -51,11 +51,13 @@ def download_and_load_model():
         
         # Find last conv layer in base_model - try multiple approaches
         last_conv_layer_name = None
+        last_conv_layer = None
         
         # Approach 1: Search by type
         for layer in reversed(base_model.layers):
             if isinstance(layer, tf.keras.layers.Conv2D):
                 last_conv_layer_name = layer.name
+                last_conv_layer = layer
                 st.info(f"🎯 Found Conv2D layer: **{layer.name}**")
                 break
         
@@ -64,15 +66,37 @@ def download_and_load_model():
             known_names = ['Conv_1', 'out_relu', 'block_16_project']
             for name in known_names:
                 try:
-                    layer = base_model.get_layer(name)
+                    last_conv_layer = base_model.get_layer(name)
                     last_conv_layer_name = name
                     st.success(f"✅ Using known layer: **{name}**")
                     break
                 except:
                     pass
         
-        # Return both the model and base_model for Grad-CAM
-        return model, base_model, last_conv_layer_name
+        # 🔧 BUILD GRAD MODEL HERE (not inside the function!)
+        grad_model = None
+        if last_conv_layer:
+            try:
+                # Create model that outputs BOTH the last conv layer AND final prediction
+                # We need to trace through the SAME computational graph
+                last_conv_output = last_conv_layer.output
+                
+                grad_model = tf.keras.Model(
+                    inputs=model.inputs,
+                    outputs=[last_conv_output, model.output]
+                )
+                
+                # Test it
+                test_input = np.random.random((1, 224, 224, 3)).astype('float32')
+                test_conv, test_pred = grad_model(test_input)
+                st.success(f"✅ Grad-CAM model created! Conv shape: {test_conv.shape}")
+                
+            except Exception as e:
+                st.error(f"❌ Grad-CAM model creation failed: {e}")
+                grad_model = None
+        
+        # Return the grad_model instead of base_model
+        return model, grad_model, last_conv_layer_name
         
     except Exception as e:
         st.error(f"❌ Error loading model: {e}")
@@ -81,28 +105,19 @@ def download_and_load_model():
         raise e
 
 
-model, base_model, last_conv_layer_name = download_and_load_model()
+model, grad_model, last_conv_layer_name = download_and_load_model()
 
 # ==========================================================
-# Grad-CAM Function (using base_model directly)
+# Grad-CAM Function (using pre-built grad_model)
 # ==========================================================
-def make_gradcam_heatmap(img_array, model, base_model, last_conv_layer_name, pred_index):
+def make_gradcam_heatmap(img_array, grad_model, pred_index):
     """
-    Generate Grad-CAM heatmap by accessing base_model directly
+    Generate Grad-CAM heatmap using pre-built grad_model
     """
-    if not last_conv_layer_name:
+    if grad_model is None:
         return None
     
     try:
-        # Create a model that maps input to conv layer output
-        grad_model = tf.keras.models.Model(
-            inputs=[model.inputs],
-            outputs=[
-                base_model.get_layer(last_conv_layer_name).output,
-                model.output
-            ]
-        )
-        
         # Compute gradient of top predicted class
         with tf.GradientTape() as tape:
             conv_outputs, predictions = grad_model(img_array)
@@ -164,14 +179,12 @@ def predict_and_visualize(img: Image.Image):
     # Generate Grad-CAM
     overlay = img_array
     
-    if last_conv_layer_name:
+    if grad_model:
         st.write("### 🔥 Generating Grad-CAM...")
         
         heatmap = make_gradcam_heatmap(
             input_array, 
-            model, 
-            base_model, 
-            last_conv_layer_name, 
+            grad_model,
             pred_idx
         )
         
@@ -189,7 +202,7 @@ def predict_and_visualize(img: Image.Image):
         else:
             st.warning("⚠️ Could not generate Grad-CAM")
     else:
-        st.warning("⚠️ No conv layer found - Grad-CAM disabled")
+        st.warning("⚠️ Grad-CAM model not available")
     
     return pred_label, confidence, overlay
 
