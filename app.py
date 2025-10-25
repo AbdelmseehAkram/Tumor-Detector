@@ -28,13 +28,34 @@ def download_and_load_model():
             gdown.download(model_url, weights_path, quiet=False)
 
     try:
-        # 🧠 Rebuild the model using Functional API for Grad-CAM
+        # 🔧 COMPLETE REWRITE: Build everything to support Grad-CAM properly
+        
+        # Step 1: Load base model
         base_model = tf.keras.applications.MobileNetV2(
             weights='imagenet', include_top=False, input_shape=(224, 224, 3)
         )
         base_model.trainable = False
-
-        # 🔧 FIX: Use Functional API instead of Sequential
+        
+        # Step 2: Find the last convolutional layer NAME in base model
+        last_conv_layer_name = None
+        for layer in reversed(base_model.layers):
+            if 'Conv' in type(layer).__name__:
+                last_conv_layer_name = layer.name
+                st.info(f"🎯 Found conv layer: **{layer.name}** (type: {type(layer).__name__})")
+                break
+        
+        if not last_conv_layer_name:
+            # Try known layer names as fallback
+            for name in ['out_relu', 'Conv_1', 'block_16_project']:
+                try:
+                    base_model.get_layer(name)
+                    last_conv_layer_name = name
+                    st.success(f"✅ Using known layer: **{name}**")
+                    break
+                except:
+                    continue
+        
+        # Step 3: Build the full model using Functional API
         inputs = tf.keras.Input(shape=(224, 224, 3))
         x = base_model(inputs, training=False)
         x = tf.keras.layers.GlobalAveragePooling2D()(x)
@@ -43,76 +64,34 @@ def download_and_load_model():
         outputs = tf.keras.layers.Dense(2, activation='softmax')(x)
         
         model = tf.keras.Model(inputs=inputs, outputs=outputs)
-
-        # Load weights
+        
+        # Step 4: Load weights
         model.load_weights(weights_path)
-
-        # 🔧 FIX: Access layers INSIDE the base_model (MobileNetV2 internal layers)
-        st.write("🔍 **Searching for convolutional layers...**")
-        st.write(f"📦 Base model type: {type(base_model).__name__}")
-        st.write(f"📦 Base model has {len(base_model.layers)} layers")
+        st.success("✅ Model weights loaded!")
         
-        last_conv_layer = None
-        conv_layers_found = []
-        
-        # Search through ALL layers in base_model (including nested ones)
-        for layer in reversed(base_model.layers):
-            # Check layer type by name patterns
-            layer_type = type(layer).__name__
-            
-            if 'Conv' in layer_type:
-                conv_layers_found.append(f"{layer.name} ({layer_type})")
-                if last_conv_layer is None:
-                    last_conv_layer = layer
-                    
-        st.write(f"🔍 **Found {len(conv_layers_found)} conv layers**")
-        if conv_layers_found:
-            st.write(f"📋 Available conv layers:")
-            for i, layer_info in enumerate(conv_layers_found[:5]):  # Show first 5
-                st.write(f"  {i+1}. {layer_info}")
-        
-        # If still not found, try known MobileNetV2 layer names
-        if last_conv_layer is None:
-            st.warning("⚠️ Trying known MobileNetV2 layer names...")
-            known_layers = [
-                'out_relu',
-                'Conv_1', 
-                'Conv_1_bn',
-                'block_16_project',
-                'block_16_project_BN'
-            ]
-            
-            for layer_name in known_layers:
-                try:
-                    last_conv_layer = base_model.get_layer(layer_name)
-                    st.success(f"✅ Found layer by name: **{layer_name}**")
-                    break
-                except:
-                    st.write(f"  ❌ '{layer_name}' not found")
-                    continue
-        
-        if last_conv_layer:
-            st.success(f"🎯 Using layer for Grad-CAM: **{last_conv_layer.name}** (type: {type(last_conv_layer).__name__})")
-        else:
-            st.error("❌ No convolutional layer found! Grad-CAM will be disabled.")
-            st.info("💡 Try printing base_model.summary() to see all available layers")
-        
-        # Create Grad-CAM model
+        # Step 5: Build Grad-CAM model if we found a conv layer
         grad_model = None
-        if last_conv_layer:
+        if last_conv_layer_name:
             try:
-                # Build grad model using the last conv layer from base_model
+                # Create a model that outputs both conv layer and final prediction
+                last_conv_layer = base_model.get_layer(last_conv_layer_name)
+                
+                # Build a new model that maps inputs to conv output and predictions
                 grad_model = tf.keras.Model(
                     inputs=model.inputs,
-                    outputs=[last_conv_layer.output, model.output]
+                    outputs=[base_model.get_layer(last_conv_layer_name).output, model.output]
                 )
-                st.success("✅ Grad-CAM model created successfully!")
+                
+                # Test the model
+                test_input = tf.random.normal((1, 224, 224, 3))
+                test_conv, test_pred = grad_model(test_input)
+                st.success(f"✅ Grad-CAM model ready! Conv shape: {test_conv.shape}")
+                
             except Exception as e:
-                st.error(f"❌ Failed to create Grad-CAM model: {e}")
-                import traceback
-                st.code(traceback.format_exc())
+                st.error(f"❌ Grad-CAM setup failed: {e}")
+                grad_model = None
 
-        return model, grad_model, last_conv_layer
+        return model, grad_model, last_conv_layer_name
         
     except Exception as e:
         st.error(f"❌ Error loading model: {e}")
@@ -121,7 +100,7 @@ def download_and_load_model():
         raise e
 
 
-model, grad_model, last_conv_layer = download_and_load_model()
+model, grad_model, last_conv_layer_name = download_and_load_model()
 st.success("✅ Model loaded successfully!")
 
 # ==========================================================
