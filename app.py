@@ -21,34 +21,46 @@ st.write("Upload an MRI image to predict whether it has a tumor.")
 @st.cache_resource
 def download_and_load_model():
     model_url = "https://drive.google.com/uc?id=1iepaskt-97Hr9hDBoiMZmNO0-qynvnBg"
-    model_path = os.path.join(tempfile.gettempdir(), "tumor_model.keras")
+    weights_path = os.path.join(tempfile.gettempdir(), "tumor_weights.keras")
 
-    if not os.path.exists(model_path):
-        with st.spinner("📥 Downloading model from Google Drive..."):
-            gdown.download(model_url, model_path, quiet=False)
+    # Download from Google Drive
+    if not os.path.exists(weights_path):
+        with st.spinner("📥 Downloading model weights from Google Drive..."):
+            gdown.download(model_url, weights_path, quiet=False)
 
     try:
-        with custom_object_scope({}):
-            model = tf.keras.models.load_model(model_path, compile=False)
+        # 🧠 Rebuild the model architecture exactly as in training
+        base_model = tf.keras.applications.MobileNetV2(
+            weights='imagenet', include_top=False, input_shape=(224, 224, 3)
+        )
+        base_model.trainable = False
 
-        # try to find conv layers
-        conv_layers = [layer for layer in model.layers if isinstance(layer, tf.keras.layers.Conv2D)]
-        if conv_layers:
-            last_conv = conv_layers[-1]
-            try:
-                grad_model = tf.keras.models.Model(
-                    inputs=model.input,
-                    outputs=[last_conv.output, model.output]
-                )
-            except Exception:
-                grad_model = None
-        else:
+        model = tf.keras.Sequential([
+            base_model,
+            tf.keras.layers.GlobalAveragePooling2D(),
+            tf.keras.layers.Dense(128, activation='relu'),
+            tf.keras.layers.Dropout(0.3),
+            tf.keras.layers.Dense(2, activation='softmax')
+        ])
+
+        # Load weights instead of full model
+        model.load_weights(weights_path)
+
+        # Create Grad-CAM helper safely
+        try:
+            last_conv_layer = base_model.get_layer("Conv_1")
+            grad_model = tf.keras.models.Model(
+                inputs=base_model.input,
+                outputs=[last_conv_layer.output, model.output]
+            )
+        except Exception:
             grad_model = None
 
         return model, grad_model
     except Exception as e:
-        st.error(f"❌ Error loading model: {e}")
+        st.error(f"❌ Error loading weights: {e}")
         raise e
+
 
 model, grad_model = download_and_load_model()
 st.success("✅ Model loaded successfully!")
@@ -118,3 +130,4 @@ else:
 
 st.markdown("---")
 st.caption("Developed by Seha | Powered by TensorFlow & Streamlit 🚀")
+
