@@ -49,53 +49,107 @@ def download_and_load_model():
         
         st.success("✅ Model weights loaded!")
         
-        # Find last conv layer in base_model - try multiple approaches
-        last_conv_layer_name = None
+        # 🔧 CRITICAL: We need to find the layer OUTPUT in the model graph, not base_model
+        # The layers inside base_model when called in Functional API create NEW outputs
+        
+        # Strategy: Find conv layer by searching through model.layers
         last_conv_layer = None
+        last_conv_layer_name = None
         
-        # Approach 1: Search by type
-        for layer in reversed(base_model.layers):
-            if isinstance(layer, tf.keras.layers.Conv2D):
-                last_conv_layer_name = layer.name
-                last_conv_layer = layer
-                st.info(f"🎯 Found Conv2D layer: **{layer.name}**")
-                break
+        st.write("🔍 Searching model layers...")
         
-        # Approach 2: Try known MobileNetV2 layers
-        if not last_conv_layer_name:
-            known_names = ['Conv_1', 'out_relu', 'block_16_project']
-            for name in known_names:
-                try:
-                    last_conv_layer = base_model.get_layer(name)
-                    last_conv_layer_name = name
-                    st.success(f"✅ Using known layer: **{name}**")
+        # Search through ALL layers in the full model (not just base_model)
+        for layer in model.layers:
+            st.write(f"  - {layer.name} ({type(layer).__name__})")
+            
+            # If this is the base_model layer itself
+            if 'mobilenetv2' in layer.name.lower() or type(layer).__name__ == 'Functional':
+                st.info(f"📦 Found base model wrapper: {layer.name}")
+                
+                # Now search inside this layer
+                for inner_layer in reversed(layer.layers):
+                    if isinstance(inner_layer, tf.keras.layers.Conv2D):
+                        last_conv_layer = inner_layer
+                        last_conv_layer_name = inner_layer.name
+                        st.success(f"✅ Found Conv2D: {inner_layer.name}")
+                        break
+                
+                if last_conv_layer:
                     break
-                except:
-                    pass
         
-        # 🔧 BUILD GRAD MODEL HERE (not inside the function!)
+        # 🔧 Build grad_model using the layer from INSIDE the model's graph
         grad_model = None
         if last_conv_layer:
             try:
-                # Create model that outputs BOTH the last conv layer AND final prediction
-                # We need to trace through the SAME computational graph
-                last_conv_output = last_conv_layer.output
+                # We need to get the output of this layer from the model's computational graph
+                # Find the layer by navigating through base_model's call
                 
-                grad_model = tf.keras.Model(
-                    inputs=model.inputs,
-                    outputs=[last_conv_output, model.output]
-                )
+                # Get base_model layer from model
+                base_in_model = None
+                for layer in model.layers:
+                    if 'mobilenetv2' in layer.name.lower() or type(layer).__name__ == 'Functional':
+                        base_in_model = layer
+                        break
                 
-                # Test it
-                test_input = np.random.random((1, 224, 224, 3)).astype('float32')
-                test_conv, test_pred = grad_model(test_input)
-                st.success(f"✅ Grad-CAM model created! Conv shape: {test_conv.shape}")
+                if base_in_model:
+                    # Get the conv layer output from base_in_model
+                    conv_output = base_in_model.get_layer(last_conv_layer_name).output
+                    
+                    grad_model = tf.keras.Model(
+                        inputs=model.inputs,
+                        outputs=[conv_output, model.output]
+                    )
+                    
+                    # Test it
+                    test_input = np.random.random((1, 224, 224, 3)).astype('float32')
+                    test_conv, test_pred = grad_model(test_input)
+                    st.success(f"✅ Grad-CAM model created! Conv shape: {test_conv.shape}")
+                else:
+                    st.error("❌ Could not find base_model in model layers")
                 
             except Exception as e:
                 st.error(f"❌ Grad-CAM model creation failed: {e}")
-                grad_model = None
+                st.write("🔄 Trying alternative approach...")
+                
+                # Alternative: Build grad model using model internals
+                try:
+                    # Find the actual tensor in the graph
+                    # When we call base_model(inputs), it creates intermediate tensors
+                    # We need to access those through the model structure
+                    
+                    # Rebuild with explicit intermediate outputs
+                    inputs = model.inputs[0]
+                    
+                    # Get base_model layer from model
+                    for layer in model.layers:
+                        if 'mobilenetv2' in layer.name.lower() or type(layer).__name__ == 'Functional':
+                            # Call base_model to get its output
+                            base_output = layer.output
+                            
+                            # Create a model that gives us internal layer output
+                            temp_model = tf.keras.Model(
+                                inputs=layer.input,
+                                outputs=layer.get_layer(last_conv_layer_name).output
+                            )
+                            
+                            # Now trace from model input through this
+                            conv_output = temp_model(inputs)
+                            
+                            grad_model = tf.keras.Model(
+                                inputs=model.inputs,
+                                outputs=[conv_output, model.output]
+                            )
+                            
+                            # Test
+                            test_input = np.random.random((1, 224, 224, 3)).astype('float32')
+                            test_conv, test_pred = grad_model(test_input)
+                            st.success(f"✅ Grad-CAM created (alt)! Conv shape: {test_conv.shape}")
+                            break
+                            
+                except Exception as e2:
+                    st.error(f"❌ Alternative also failed: {e2}")
+                    grad_model = None
         
-        # Return the grad_model instead of base_model
         return model, grad_model, last_conv_layer_name
         
     except Exception as e:
