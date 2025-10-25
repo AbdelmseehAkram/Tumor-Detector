@@ -14,11 +14,17 @@ def load_model():
         file_id = "1MNzIKsB2VKNleMR2hQzBMpeD69eiF0ej"  # Google Drive file ID
         url = f"https://drive.google.com/uc?id={file_id}"
         gdown.download(url, model_path, quiet=False)
-    model = tf.keras.models.load_model(model_path)
+    
+    try:
+        model = tf.keras.models.load_model(model_path, compile=False)
+    except Exception as e:
+        st.error(f"⚠️ Error loading model: {e}")
+        raise e
+
     return model
 
 
-# Load the model
+# Load model
 model = load_model()
 
 # 🎨 Streamlit UI
