@@ -1,6 +1,5 @@
 streamlit==1.39.0
-tensorflow==2.15.0
-opencv-python-headless==4.8.1.78
-numpy
-Pillow
-gdown
+tensorflow==2.16.1
+opencv-python-headless==4.10.0.84
+gdown==5.2.0
+numpy==1.26.4
