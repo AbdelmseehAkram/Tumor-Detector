@@ -4,4 +4,3 @@ numpy
 opencv-python-headless
 gdown
 pillow
-matplotlib
