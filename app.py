@@ -1,133 +1,127 @@
+# ==========================================================
+# Tumor Detection Streamlit App with Grad-CAM
+# ==========================================================
+import os
+import tempfile
+import gdown
 import streamlit as st
-import tensorflow as tf
 import numpy as np
 import cv2
-import gdown
-import os
-from PIL import Image
-import tempfile
-from tensorflow.keras.utils import custom_object_scope
+import tensorflow as tf
+from tensorflow.keras.applications import MobileNetV2
+from tensorflow.keras.preprocessing import image as keras_image
 
 # ==========================================================
-# Streamlit Config
+# App Config
 # ==========================================================
-st.set_page_config(page_title="Brain Tumor Detector", page_icon="🧠", layout="wide")
-st.title("🧠 Brain Tumor Detection")
-st.write("Upload an MRI image to predict whether it has a tumor.")
+st.set_page_config(
+    page_title="Tumor Detection with Grad-CAM",
+    layout="centered",
+    initial_sidebar_state="expanded"
+)
+
+st.title("🧠 Brain Tumor Detection with Grad-CAM")
+st.markdown("Upload an MRI/CT image and get prediction with heatmap visualization.")
 
 # ==========================================================
-# Download and Load Model from Google Drive
+# Load Model from Google Drive (weights only)
 # ==========================================================
 @st.cache_resource
 def download_and_load_model():
+    # Google Drive file ID
     model_url = "https://drive.google.com/uc?id=1iepaskt-97Hr9hDBoiMZmNO0-qynvnBg"
     weights_path = os.path.join(tempfile.gettempdir(), "tumor_weights.keras")
 
-    # Download from Google Drive
+    # Download weights if not exist
     if not os.path.exists(weights_path):
         with st.spinner("📥 Downloading model weights from Google Drive..."):
             gdown.download(model_url, weights_path, quiet=False)
 
     try:
-        # 🧠 Rebuild the model architecture exactly as in training
-        base_model = tf.keras.applications.MobileNetV2(
-            weights='imagenet', include_top=False, input_shape=(224, 224, 3)
-        )
+        # Build base MobileNetV2
+        base_model = MobileNetV2(weights='imagenet', include_top=False, input_shape=(224,224,3))
         base_model.trainable = False
 
-        model = tf.keras.Sequential([
-            base_model,
-            tf.keras.layers.GlobalAveragePooling2D(),
-            tf.keras.layers.Dense(128, activation='relu'),
-            tf.keras.layers.Dropout(0.3),
-            tf.keras.layers.Dense(2, activation='softmax')
-        ])
+        # Add classification head
+        x = tf.keras.layers.GlobalAveragePooling2D()(base_model.output)
+        x = tf.keras.layers.Dense(128, activation='relu')(x)
+        x = tf.keras.layers.Dropout(0.3)(x)
+        output = tf.keras.layers.Dense(2, activation='softmax')(x)
 
-        # Load weights instead of full model
+        model = tf.keras.Model(inputs=base_model.input, outputs=output)
         model.load_weights(weights_path)
 
-        # Create Grad-CAM helper safely
-        try:
-            last_conv_layer = base_model.get_layer("Conv_1")
-            grad_model = tf.keras.models.Model(
-                inputs=base_model.input,
-                outputs=[last_conv_layer.output, model.output]
-            )
-        except Exception:
-            grad_model = None
+        # Grad-CAM model
+        last_conv_layer = base_model.get_layer("Conv_1")
+        grad_model = tf.keras.models.Model(
+            [model.inputs],
+            [last_conv_layer.output, model.output]
+        )
 
         return model, grad_model
     except Exception as e:
         st.error(f"❌ Error loading weights: {e}")
         raise e
 
-
 model, grad_model = download_and_load_model()
 st.success("✅ Model loaded successfully!")
 
 # ==========================================================
-# Prediction and Grad-CAM Visualization
+# Image Upload
 # ==========================================================
-def predict_and_visualize(img: Image.Image):
-    img_array = np.array(img)
-    input_img = cv2.resize(img_array, (224, 224))
-    input_array = tf.keras.applications.mobilenet_v2.preprocess_input(
-        np.expand_dims(input_img, axis=0)
-    )
+uploaded_file = st.file_uploader("Upload MRI/CT Image", type=["jpg", "jpeg", "png"])
+if uploaded_file is not None:
+    file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+    img = cv2.imdecode(file_bytes, 1)
+    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    st.image(img_rgb, caption="🧩 Uploaded Image", use_column_width=True)
 
-    preds = model.predict(input_array)
-    pred_idx = np.argmax(preds[0])
-    pred_label = "Tumor" if pred_idx == 0 else "Normal"
-    confidence = preds[0][pred_idx] * 100
+    # ======================================================
+    # Preprocess Image
+    # ======================================================
+    img_resized = cv2.resize(img_rgb, (224,224))
+    img_array = keras_image.img_to_array(img_resized)
+    img_array = np.expand_dims(img_array, axis=0)
+    img_array = tf.keras.applications.mobilenet_v2.preprocess_input(img_array)
 
-    # Grad-CAM
-    if grad_model:
-        try:
-            with tf.GradientTape() as tape:
-                conv_outputs, predictions = grad_model(input_array)
-                loss = predictions[:, pred_idx]
+    # ======================================================
+    # Predict
+    # ======================================================
+    preds = model.predict(img_array)
+    class_idx = np.argmax(preds[0])
+    classes = ["Cancer", "Normal"]
+    pred_label = classes[class_idx]
+    probability = float(preds[0][class_idx]*100)
+    st.write(f"**Prediction:** {pred_label} ({probability:.2f}%)")
 
-            grads = tape.gradient(loss, conv_outputs)[0]
-            pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-            heatmap = tf.reduce_mean(tf.multiply(pooled_grads, conv_outputs[0]), axis=-1)
+    # ======================================================
+    # Grad-CAM Functions
+    # ======================================================
+    def make_gradcam_heatmap(img_array, grad_model, pred_index=None):
+        with tf.GradientTape() as tape:
+            last_conv_output, preds = grad_model(img_array)
+            if pred_index is None:
+                pred_index = tf.argmax(preds[0])
+            class_channel = preds[:, pred_index]
 
-            heatmap = np.maximum(heatmap, 0)
-            heatmap /= np.max(heatmap) if np.max(heatmap) != 0 else 1
+        grads = tape.gradient(class_channel, last_conv_output)
+        pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+        last_conv_output = last_conv_output[0]
 
-            heatmap = cv2.resize(heatmap, (img_array.shape[1], img_array.shape[0]))
-            heatmap = np.uint8(255 * heatmap)
-            heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
-            overlay = cv2.addWeighted(img_array, 0.6, heatmap, 0.4, 0)
-        except Exception:
-            overlay = img_array
-    else:
-        overlay = img_array
+        heatmap = last_conv_output @ pooled_grads[..., tf.newaxis]
+        heatmap = tf.squeeze(heatmap)
+        heatmap = tf.maximum(heatmap, 0) / tf.math.reduce_max(heatmap)
+        return heatmap.numpy()
 
-    return pred_label, confidence, overlay
+    def overlay_heatmap(heatmap, image, alpha=0.4):
+        heatmap = np.uint8(255 * heatmap)
+        heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+        overlay = cv2.addWeighted(heatmap, alpha, image, 1 - alpha, 0)
+        return overlay
 
-
-# ==========================================================
-# Upload Section
-# ==========================================================
-uploaded_file = st.file_uploader("📁 Upload an MRI Image", type=["jpg", "jpeg", "png"])
-
-if uploaded_file:
-    img = Image.open(uploaded_file).convert("RGB")
-    st.image(np.array(img), caption="🧩 Uploaded Image", use_container_width=True)
-
-    if st.button("🔍 Analyze Image"):
-        with st.spinner("Analyzing..."):
-            label, conf, cam = predict_and_visualize(img)
-
-        st.markdown(f"### 🧾 Prediction: **{label} ({conf:.2f}%)**")
-        st.image(
-            cv2.cvtColor(cam, cv2.COLOR_BGR2RGB),
-            caption="🔥 Grad-CAM Visualization",
-            use_container_width=True
-        )
-else:
-    st.info("Please upload an image to start.")
-
-st.markdown("---")
-st.caption("Developed by Seha | Powered by TensorFlow & Streamlit 🚀")
-
+    # ======================================================
+    # Generate Grad-CAM Heatmap
+    # ======================================================
+    heatmap = make_gradcam_heatmap(img_array, grad_model, class_idx)
+    overlay_img = overlay_heatmap(heatmap, img_rgb)
+    st.image(overlay_img, caption="🧠 Grad-CAM Heatmap", use_column_width=True)
