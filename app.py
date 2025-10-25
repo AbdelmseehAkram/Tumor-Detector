@@ -51,10 +51,12 @@ def download_and_load_model():
         # Find the last convolutional layer in MobileNetV2
         last_conv_layer = None
         for layer in reversed(base_model.layers):
-            if len(layer.output_shape) == 4:  # Convolutional layer
-                last_conv_layer = layer
-                st.info(f"🎯 Using layer for Grad-CAM: **{layer.name}**")
-                break
+            # Check if layer has output_shape attribute first
+            if hasattr(layer, 'output_shape') and layer.output_shape is not None:
+                if len(layer.output_shape) == 4:  # Convolutional layer
+                    last_conv_layer = layer
+                    st.info(f"🎯 Using layer for Grad-CAM: **{layer.name}**")
+                    break
         
         # Create Grad-CAM model
         grad_model = None
