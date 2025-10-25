@@ -6,7 +6,6 @@ import gdown
 import os
 from PIL import Image
 import tempfile
-from tensorflow.keras.utils import custom_object_scope
 
 # ==========================================================
 # Streamlit Config
@@ -46,15 +45,42 @@ def download_and_load_model():
         # Load weights instead of full model
         model.load_weights(weights_path)
 
-        # Create Grad-CAM helpers safely
+        # 🔧 FIX: Get the correct last conv layer for MobileNetV2
+        # Print all layer names to debug
+        st.write("🔍 **Debug: Available layers in base_model:**")
+        layer_names = [layer.name for layer in base_model.layers if 'conv' in layer.name.lower()]
+        st.write(layer_names[-5:])  # Show last 5 conv layers
+        
+        # Try different possible last conv layer names
         conv_model = None
         head_model = None
         try:
-            last_conv_layer = base_model.get_layer("out_relu")
-            conv_model = tf.keras.models.Model(inputs=model.input, outputs=last_conv_layer.output)
-            head_model = tf.keras.models.Model(inputs=last_conv_layer.output, outputs=model.output)
-        except Exception:
-            pass
+            # MobileNetV2's actual last conv layer names
+            possible_names = ["out_relu", "Conv_1", "Conv_1_bn", "block_16_project"]
+            last_conv_layer = None
+            
+            for name in possible_names:
+                try:
+                    last_conv_layer = base_model.get_layer(name)
+                    st.success(f"✅ Found layer: {name}")
+                    break
+                except:
+                    continue
+            
+            if last_conv_layer is None:
+                # Fallback: get last layer with output
+                for layer in reversed(base_model.layers):
+                    if len(layer.output_shape) == 4:  # Conv layer has 4D output
+                        last_conv_layer = layer
+                        st.success(f"✅ Using fallback layer: {layer.name}")
+                        break
+            
+            if last_conv_layer:
+                conv_model = tf.keras.models.Model(inputs=model.input, outputs=last_conv_layer.output)
+                head_model = tf.keras.models.Model(inputs=last_conv_layer.output, outputs=model.output)
+            
+        except Exception as e:
+            st.warning(f"⚠️ Grad-CAM setup warning: {e}")
 
         return model, conv_model, head_model
     except Exception as e:
@@ -77,35 +103,61 @@ def predict_and_visualize(img: Image.Image):
 
     preds = model.predict(input_array)
     pred_idx = np.argmax(preds[0])
+    
+    # 🔧 FIX: Show both class probabilities for debugging
+    st.write(f"**Debug - Class 0 (Tumor?): {preds[0][0]*100:.2f}%**")
+    st.write(f"**Debug - Class 1 (Normal?): {preds[0][1]*100:.2f}%**")
+    
     pred_label = "Tumor" if pred_idx == 0 else "Normal"
     confidence = preds[0][pred_idx] * 100
 
-    # Grad-CAM
+    # Grad-CAM - Only for TUMOR predictions
+    overlay = img_array
+    
     if conv_model and head_model:
         try:
-            input_tensor = tf.convert_to_tensor(input_array)  # Explicitly convert to tensor for safety
+            input_tensor = tf.convert_to_tensor(input_array)
+            
             with tf.GradientTape() as tape:
                 conv_outputs = conv_model(input_tensor)
                 tape.watch(conv_outputs)
                 predictions = head_model(conv_outputs)
-                loss = predictions[:, pred_idx]
+                # 🔧 FIX: Always use index 0 (Tumor class) for heatmap
+                loss = predictions[:, 0]  # Changed from pred_idx to 0
 
-            grads = tape.gradient(loss, conv_outputs)[0]
-            pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-            heatmap = tf.reduce_mean(tf.multiply(pooled_grads, conv_outputs[0]), axis=-1)
-
-            heatmap = np.maximum(heatmap, 0)
-            heatmap /= np.max(heatmap) if np.max(heatmap) != 0 else 1
-
-            heatmap = cv2.resize(heatmap, (img_array.shape[1], img_array.shape[0]))
-            heatmap = np.uint8(255 * heatmap)
-            heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
-            overlay = cv2.addWeighted(img_array, 0.6, heatmap, 0.4, 0)
+            grads = tape.gradient(loss, conv_outputs)
+            
+            if grads is not None:
+                grads = grads[0]
+                pooled_grads = tf.reduce_mean(grads, axis=(0, 1))
+                conv_outputs_val = conv_outputs[0]
+                
+                # Weight the channels by the gradients
+                for i in range(pooled_grads.shape[-1]):
+                    conv_outputs_val[:, :, i] *= pooled_grads[i]
+                
+                heatmap = tf.reduce_mean(conv_outputs_val, axis=-1)
+                heatmap = np.maximum(heatmap, 0)
+                
+                if np.max(heatmap) != 0:
+                    heatmap /= np.max(heatmap)
+                
+                # Resize and apply colormap
+                heatmap = cv2.resize(heatmap.numpy(), (img_array.shape[1], img_array.shape[0]))
+                heatmap = np.uint8(255 * heatmap)
+                heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+                
+                # Blend with original image
+                overlay = cv2.addWeighted(img_array, 0.6, heatmap, 0.4, 0)
+                st.success("✅ Grad-CAM generated successfully!")
+            else:
+                st.warning("⚠️ Gradients are None")
+                
         except Exception as e:
             st.error(f"❌ Error in Grad-CAM: {e}")
+            import traceback
+            st.code(traceback.format_exc())
             overlay = img_array
-    else:
-        overlay = img_array
 
     return pred_label, confidence, overlay
 
@@ -126,7 +178,7 @@ if uploaded_file:
         st.markdown(f"### 🧾 Prediction: **{label} ({conf:.2f}%)**")
         st.image(
             cv2.cvtColor(cam, cv2.COLOR_BGR2RGB),
-            caption="🔥 Grad-CAM Visualization",
+            caption="🔥 Grad-CAM Visualization (Tumor Focus)",
             use_container_width=True
         )
 else:
