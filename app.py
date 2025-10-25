@@ -6,16 +6,17 @@ import gdown
 import os
 from PIL import Image
 import tempfile
+from tensorflow.keras.utils import custom_object_scope
 
 # ==========================================================
-# 🧠 Streamlit Setup
+# Streamlit Config
 # ==========================================================
 st.set_page_config(page_title="Brain Tumor Detector", page_icon="🧠", layout="wide")
 st.title("🧠 Brain Tumor Detection")
-st.write("Upload an MRI image, and the model will predict whether it has a tumor.")
+st.write("Upload an MRI image to predict whether it has a tumor.")
 
 # ==========================================================
-# 📥 Download and Load Model
+# Download and Load Model from Google Drive
 # ==========================================================
 @st.cache_resource
 def download_and_load_model():
@@ -23,35 +24,37 @@ def download_and_load_model():
     model_path = os.path.join(tempfile.gettempdir(), "tumor_model.keras")
 
     if not os.path.exists(model_path):
-        with st.spinner("Downloading model from Google Drive..."):
+        with st.spinner("📥 Downloading model from Google Drive..."):
             gdown.download(model_url, model_path, quiet=False)
 
     try:
-        model = tf.keras.models.load_model(model_path, compile=False)
+        with custom_object_scope({}):
+            model = tf.keras.models.load_model(model_path, compile=False)
 
-        # نحاول نجيب آخر طبقة Conv تلقائيًا (من أي موديل)
+        # try to find conv layers
         conv_layers = [layer for layer in model.layers if isinstance(layer, tf.keras.layers.Conv2D)]
-        if not conv_layers:
-            st.error("❌ No Conv2D layers found — Grad-CAM won't work.")
-            grad_model = None
+        if conv_layers:
+            last_conv = conv_layers[-1]
+            try:
+                grad_model = tf.keras.models.Model(
+                    inputs=model.input,
+                    outputs=[last_conv.output, model.output]
+                )
+            except Exception:
+                grad_model = None
         else:
-            last_conv_layer = conv_layers[-1]
-            grad_model = tf.keras.models.Model(
-                inputs=model.input,
-                outputs=[last_conv_layer.output, model.output]
-            )
+            grad_model = None
 
         return model, grad_model
     except Exception as e:
         st.error(f"❌ Error loading model: {e}")
         raise e
 
-
 model, grad_model = download_and_load_model()
 st.success("✅ Model loaded successfully!")
 
 # ==========================================================
-# 🔍 Prediction + Grad-CAM
+# Prediction and Grad-CAM Visualization
 # ==========================================================
 def predict_and_visualize(img: Image.Image):
     img_array = np.array(img)
@@ -65,25 +68,26 @@ def predict_and_visualize(img: Image.Image):
     pred_label = "Tumor" if pred_idx == 0 else "Normal"
     confidence = preds[0][pred_idx] * 100
 
-    # 🔥 Grad-CAM
+    # Grad-CAM
     if grad_model:
-        with tf.GradientTape() as tape:
-            conv_outputs, predictions = grad_model(input_array)
-            loss = predictions[:, pred_idx]
+        try:
+            with tf.GradientTape() as tape:
+                conv_outputs, predictions = grad_model(input_array)
+                loss = predictions[:, pred_idx]
 
-        grads = tape.gradient(loss, conv_outputs)[0]
-        pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-        heatmap = tf.reduce_mean(tf.multiply(pooled_grads, conv_outputs[0]), axis=-1)
+            grads = tape.gradient(loss, conv_outputs)[0]
+            pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+            heatmap = tf.reduce_mean(tf.multiply(pooled_grads, conv_outputs[0]), axis=-1)
 
-        # Normalize heatmap
-        heatmap = np.maximum(heatmap, 0)
-        heatmap /= np.max(heatmap) if np.max(heatmap) != 0 else 1
+            heatmap = np.maximum(heatmap, 0)
+            heatmap /= np.max(heatmap) if np.max(heatmap) != 0 else 1
 
-        # Resize heatmap to match image
-        heatmap = cv2.resize(heatmap, (img_array.shape[1], img_array.shape[0]))
-        heatmap = np.uint8(255 * heatmap)
-        heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
-        overlay = cv2.addWeighted(img_array, 0.6, heatmap, 0.4, 0)
+            heatmap = cv2.resize(heatmap, (img_array.shape[1], img_array.shape[0]))
+            heatmap = np.uint8(255 * heatmap)
+            heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+            overlay = cv2.addWeighted(img_array, 0.6, heatmap, 0.4, 0)
+        except Exception:
+            overlay = img_array
     else:
         overlay = img_array
 
@@ -91,9 +95,9 @@ def predict_and_visualize(img: Image.Image):
 
 
 # ==========================================================
-# 📤 Upload Section
+# Upload Section
 # ==========================================================
-uploaded_file = st.file_uploader("📁 Upload an MRI image", type=["jpg", "jpeg", "png"])
+uploaded_file = st.file_uploader("📁 Upload an MRI Image", type=["jpg", "jpeg", "png"])
 
 if uploaded_file:
     img = Image.open(uploaded_file).convert("RGB")
@@ -110,10 +114,7 @@ if uploaded_file:
             use_container_width=True
         )
 else:
-    st.info("Please upload an image to begin.")
+    st.info("Please upload an image to start.")
 
-# ==========================================================
-# 🧾 Footer
-# ==========================================================
 st.markdown("---")
 st.caption("Developed by Seha | Powered by TensorFlow & Streamlit 🚀")
